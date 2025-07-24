@@ -177,7 +177,7 @@ class EmbodiedAIProcessor:
         #     channels = self.joint_channels.get(joint_name, [])
         #     print(f"  {joint_name}: 父={parent}, 偏移={offset}, 通道={len(channels)}个")
         
-    def add_mid360_radar_joint(self):
+    def add_mid360_radar_joint(self, parent_joint):
         """添加Mid360雷达关节到骨架结构中"""
         radar_joint_name = "Mid360Radar"
         
@@ -189,12 +189,12 @@ class EmbodiedAIProcessor:
         # 添加雷达关节到关节列表
         self.joint_names.append(radar_joint_name)
         
-        # 设置雷达关节的父关节为Hips(pelvis)
-        parent_joint = None
-        for candidate in ["Hips", "Pelvis", "pelvis", "hips"]:
-            if candidate in self.joint_names:
-                parent_joint = candidate
-                break
+        # # 设置雷达关节的父关节为Hips(pelvis)
+        # parent_joint = None
+        # for candidate in ["Hips", "Pelvis", "pelvis", "hips"]:
+        #     if candidate in self.joint_names:
+        #         parent_joint = candidate
+        #         break
         
         if parent_joint is None:
             # 如果没有找到Hips，使用第一个关节作为父关节
@@ -204,15 +204,28 @@ class EmbodiedAIProcessor:
         self.joint_parents[radar_joint_name] = parent_joint
         
         # 设置雷达关节的偏移
-        self.joint_offsets[radar_joint_name] = self.radar_offset.copy()
+        # 计算父关节相对根关节的偏移
+        if parent_joint not in self.joint_offsets:
+            print(f"警告: 父关节 {parent_joint} 没有偏移数据，使用默认偏移")
+
+        parent_offset = np.zeros(3)
+        parent = parent_joint
+        while parent != "Hips" and parent is not None:
+            parent_offset += self.joint_offsets.get(parent, np.zeros(3))
+            parent = self.joint_parents.get(parent, None)
+            # print(f" 关节{parent_joint} 相对于关节{parent} 的偏移: {parent_offset}")
+
+
+        radar_offset = self.radar_offset - parent_offset
+        self.joint_offsets[radar_joint_name] = radar_offset
         
         # 雷达关节通常只有位置，没有旋转通道
         self.joint_channels[radar_joint_name] = []
         
         print(f"已添加雷达关节: {radar_joint_name}")
         print(f"  父关节: {parent_joint}")
-        print(f"  偏移: {self.radar_offset}")
-    
+        print(f"  偏移: {radar_offset}")
+
     def compute_joint_positions(self):
         """使用正向运动学计算所有关节在世界坐标系中的3D位置"""
         num_frames = len(self.motion_data)
@@ -232,8 +245,8 @@ class EmbodiedAIProcessor:
             
             # 首先解析所有关节的局部变换
             for joint_name in self.joint_names:
-                if joint_name == "Mid360Radar":
-                    continue  # 雷达关节单独处理
+                # if joint_name == "Mid360Radar":
+                #     continue  # 雷达关节单独处理
                     
                 channels = self.joint_channels.get(joint_name, [])
                 
@@ -274,25 +287,26 @@ class EmbodiedAIProcessor:
                 if joint_name in joint_world_transforms:
                     return joint_world_transforms[joint_name]
                 
-                if joint_name == "Mid360Radar":
-                    # 雷达关节特殊处理 - 跟随父关节（Hips）的旋转
-                    parent_name = self.joint_parents[joint_name]
-                    if parent_name and parent_name in self.joint_names:
-                        parent_transform = compute_world_transform(parent_name)
-                        # 雷达位置 = 父关节世界位置 + 经过父关节旋转后的雷达偏移
-                        radar_offset_rotated = self._rotate_vector(self.radar_offset, parent_transform['rotation'])
-                        world_position = parent_transform['position'] + radar_offset_rotated
-                        joint_world_transforms[joint_name] = {
-                            'position': world_position,
-                            'rotation': parent_transform['rotation']  # 雷达继承父关节旋转
-                        }
-                    else:
-                        # 如果没有父关节，使用原始偏移
-                        joint_world_transforms[joint_name] = {
-                            'position': self.radar_offset.copy(),
-                            'rotation': np.zeros(3)
-                        }
-                    return joint_world_transforms[joint_name]
+                # if joint_name == "Mid360Radar":
+                #     # 雷达关节特殊处理 - 跟随父关节的旋转
+                #     parent_name = self.joint_parents[joint_name]
+                #     print(f"  关节{joint_name} 的父关节: {parent_name}")
+                #     if parent_name and parent_name in self.joint_names:
+                #         parent_transform = compute_world_transform(parent_name)
+                #         # 雷达位置 = 父关节世界位置 + 经过父关节旋转后的雷达偏移
+                #         radar_offset_rotated = self._rotate_vector(self.joint_offsets[joint_name], parent_transform['rotation'])
+                #         world_position = parent_transform['position'] + radar_offset_rotated
+                #         joint_world_transforms[joint_name] = {
+                #             'position': world_position,
+                #             'rotation': parent_transform['rotation']  # 雷达继承父关节旋转
+                #         }
+                #     else:
+                #         # 如果没有父关节，使用原始偏移
+                #         joint_world_transforms[joint_name] = {
+                #             'position': self.radar_offset.copy(),
+                #             'rotation': np.zeros(3)
+                #         }
+                #     return joint_world_transforms[joint_name]
                 
                 # 普通关节处理
                 parent_name = self.joint_parents[joint_name]
@@ -842,7 +856,7 @@ class EmbodiedAIProcessor:
         
         plt.show()
     
-    def process_bvh_to_pkl(self, bvh_path, pkl_path):
+    def process_bvh_to_pkl(self, bvh_path, pkl_path, parent_joint='Hips'):
         """完整处理流程：从BVH到PKL，添加雷达关节"""
         print("=" * 60)
         print("开始具身智能BVH到PKL转换流程")
@@ -852,7 +866,7 @@ class EmbodiedAIProcessor:
         self.parse_bvh(bvh_path)
         
         # 2. 添加mid360雷达关节
-        self.add_mid360_radar_joint()
+        self.add_mid360_radar_joint(parent_joint)
         
         # 3. 计算关节位置
         joint_positions = self.compute_joint_positions()

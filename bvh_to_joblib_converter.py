@@ -20,13 +20,25 @@ except ImportError:
     print("请确保embodied_ai_processor.py在同一目录下")
     sys.exit(1)
 
+# 导入计算偏移和URDF解析功能
+try:
+    from compute_offset_by_parent import compute_relative_offset, print_urdf_summary
+except ImportError:
+    print("请确保compute_offset_by_parent.py在同一目录下")
+    sys.exit(1)
+
+radar_parent_joint = "Neck"  # 雷达关节的父关节名称
+
 class BVHToJoblibConverter:
     """BVH到joblib格式转换器"""
     
     def __init__(self):
-        # 雷达偏移相对于根关节（Hips），保持原始XYZ坐标系
+        # 雷达偏移相对于根关节，保持原始XYZ坐标系
         # 原始偏移 [0.003, 46.018, -0.368] 对应 XYZ坐标系
-        original_radar_offset = [0.003, 46.018, -0.368]
+        raw_offset = compute_relative_offset("logo_joint", "mid360_joint")
+        raw_offset = np.array(raw_offset) * 100  # 转换为厘米
+        original_radar_offset = [raw_offset[1], raw_offset[2], raw_offset[0]]  # 转换为ZXY坐标系
+        print(f"雷达偏移 (ZXY坐标系): {original_radar_offset}")
         self.processor = EmbodiedAIProcessor(radar_offset=original_radar_offset)
         
         # SMPL关节映射 - 从60关节模板映射到45关节SMPL格式
@@ -133,8 +145,9 @@ class BVHToJoblibConverter:
             # 将雷达偏移从原始XYZ坐标系转换到ZXY坐标系
             radar_offset_zxy = np.array([radar_offset[2], radar_offset[0], radar_offset[1]])
             
-            # 雷达位置 = 根关节位置 + 雷达偏移（转换为米）
-            smpl_joints[:, 45, :] = smpl_joints[:, root_idx, :] + radar_offset_zxy * 0.01
+            # 雷达位置 = 父关节位置 + 雷达偏移（转换为米）
+            parent_idx = name_to_idx.get(radar_parent_joint, 0)  # 默认使用Hips作为父关节
+            smpl_joints[:, 45, :] = smpl_joints[:, parent_idx, :] + radar_offset_zxy * 0.01
             print("⚠ 使用简化雷达偏移（无旋转）")
         
         return smpl_joints
@@ -233,23 +246,16 @@ class BVHToJoblibConverter:
         
         return dof, hand_dof
     
-    def convert_bvh_to_joblib(self, bvh_file, output_file=None, apply_foot_constraint=True):
+    def convert_bvh_to_joblib(self, bvh_file, output_file=None):
         """将BVH文件转换为joblib格式"""
         print(f"=== BVH到joblib格式转换 ===")
         print(f"输入文件: {bvh_file}")
         
         # 使用原有处理器处理BVH
         try:
-            # 设置双脚约束（通过处理器实例变量）
-            if hasattr(self.processor, 'apply_foot_constraint'):
-                self.processor.apply_foot_constraint = apply_foot_constraint
-                
-            if apply_foot_constraint:
-                print("✓ 启用双脚高度约束")
-            
             # 处理BVH文件
             temp_pkl = "temp_output.pkl"
-            pkl_data = self.processor.process_bvh_to_pkl(bvh_file, temp_pkl)
+            pkl_data = self.processor.process_bvh_to_pkl(bvh_file, temp_pkl, radar_parent_joint)
             
             if pkl_data is None:
                 print("✗ BVH处理失败")
@@ -343,8 +349,7 @@ class BVHToJoblibConverter:
             'original_joints': joint_positions.shape[1],
             'smpl_joints': smpl_joints.shape[1],
             'fps': fps,
-            'duration': joint_positions.shape[0] / fps,
-            'foot_constraint_applied': apply_foot_constraint
+            'duration': joint_positions.shape[0] / fps
         }
         
         return conversion_info
@@ -392,8 +397,7 @@ def main():
     # 执行转换
     result = converter.convert_bvh_to_joblib(
         args.input,
-        args.output,
-        apply_foot_constraint=not args.no_foot_constraint
+        args.output
     )
     
     if result:
@@ -405,7 +409,6 @@ def main():
         print(f"SMPL关节: {result['smpl_joints']}")
         print(f"FPS: {result['fps']}")
         print(f"时长: {result['duration']:.2f}秒")
-        print(f"双脚约束: {'是' if result['foot_constraint_applied'] else '否'}")
         
         # 分析输出文件
         if args.analyze:
